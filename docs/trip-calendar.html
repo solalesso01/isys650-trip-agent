@@ -816,6 +816,7 @@
     }
 
     function showPlan(plan) {
+      selectedKey = '';
       const cities = [...new Set(plan.days.map(day => day.city))];
       generatedDays = Object.fromEntries(plan.days.map((day, index) => [day.date, {
         city: day.city, day: index + 1, className: palette[cities.indexOf(day.city) % palette.length],
@@ -909,6 +910,21 @@
       chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
+    async function readPlanResponse(response) {
+      const responseBody = await response.text();
+      let result;
+      try {
+        result = JSON.parse(responseBody);
+      } catch {
+        const message = response.ok
+          ? 'The planner returned an invalid response. Please try again.'
+          : 'The planning service returned an unexpected response. Please try again shortly.';
+        throw new Error(message);
+      }
+      if (!response.ok) throw new Error(result.error || `Planning failed (${response.status}).`);
+      return result;
+    }
+
     async function submitChat(request) {
       const cleanRequest = request.trim();
       if (!cleanRequest) return;
@@ -916,18 +932,20 @@
       chatInput.value = '';
       chatInput.disabled = true;
       document.querySelector('.chat-send').disabled = true;
+      calendarGrid.setAttribute('aria-busy', 'true');
       const loading = document.createElement('div');
       loading.className = 'message bot';
-      loading.textContent = 'Researching and planning…';
+      loading.textContent = activePlan ? 'Refreshing your trip with the new details…' : 'Researching and planning…';
       chatMessages.append(loading);
       chatMessages.scrollTop = chatMessages.scrollHeight;
       try {
         const response = await fetch('/api/plan', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          cache: 'no-store',
           body: JSON.stringify({prompt: pendingRequest ? `${pendingRequest}\nAdditional detail: ${cleanRequest}` : cleanRequest, previous: activePlan})
         });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Planning failed.');
+        const result = await readPlanResponse(response);
         if (result.question) {
           pendingRequest = pendingRequest ? `${pendingRequest}\nAdditional detail: ${cleanRequest}` : cleanRequest;
           addMessage(result.question, 'bot');
@@ -941,6 +959,7 @@
         addMessage(error.message, 'bot');
       } finally {
         loading.remove();
+        calendarGrid.removeAttribute('aria-busy');
         chatInput.disabled = false;
         document.querySelector('.chat-send').disabled = false;
         chatInput.placeholder = activePlan ? 'Ask for another revision' : 'Destination, dates, budget and interests';
