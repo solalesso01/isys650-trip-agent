@@ -1,5 +1,7 @@
 import json
+import http.client
 import tempfile
+import threading
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
@@ -9,9 +11,34 @@ import app
 
 
 class PlannerTest(unittest.TestCase):
-    def test_plan_without_daily_limit(self):
+    def test_api_validation_errors_are_json(self):
+        server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+            connection.request("POST", "/api/plan", "{}", {"Content-Type": "text/plain"})
+            response = connection.getresponse()
+            data = json.loads(response.read())
+            connection.close()
+        finally:
+            thread.join(timeout=2)
+            server.server_close()
+
+        self.assertEqual(response.status, 415)
+        self.assertIn("application/json", response.getheader("Content-Type"))
+        self.assertIn("application/json", data["error"])
+
+    def test_calendar_handles_non_json_responses_and_refreshes(self):
+        calendar = (app.ROOT / "docs/trip-calendar.html").read_text()
+        self.assertIn("const responseBody = await response.text()", calendar)
+        self.assertIn("result = JSON.parse(responseBody)", calendar)
+        self.assertIn("Refreshing your trip with the new details", calendar)
+        self.assertIn("selectedKey = '';", calendar)
+
+    def test_accepts_thirty_day_plan_without_daily_limit(self):
         itinerary = {"title": "Rome", "summary": "Estimates only", "days": [
-            {"date": f"2027-04-0{i}", "city": "Rome", "activities": []} for i in range(5, 8)
+            {"date": f"2027-01-{i:02d}", "city": "Rome", "activities": []} for i in range(1, 31)
         ]}
         response = {"choices": [{"message": {"content": json.dumps(itinerary)}}]}
 
@@ -25,7 +52,7 @@ class PlannerTest(unittest.TestCase):
             key.write_text("test-key")
             with patch.dict(app.os.environ, {"OPENROUTER_KEY_FILE": str(key)}), \
                  patch.object(app, "urlopen", return_value=FakeResponse()) as upstream:
-                self.assertEqual(app.plan({"prompt": "Rome April 5–7, 2027"}), itinerary)
+                self.assertEqual(app.plan({"prompt": "Rome January 1–30, 2027"}), itinerary)
                 payload = json.loads(upstream.call_args.args[0].data)
                 self.assertEqual(payload["model"], "deepseek/deepseek-v4.1-flash")
                 self.assertEqual(payload["reasoning"]["effort"], "high")
@@ -83,6 +110,25 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(len(result["days"]), 15)
         self.assertEqual(result["days"][0]["date"], "2027-04-05")
         self.assertEqual(result["days"][-1]["date"], "2027-04-19")
+
+    def test_rejects_more_than_thirty_days(self):
+        itinerary = {"title": "Long trip", "summary": "Too long", "days": [
+            {"date": f"2027-01-{i:02d}", "city": "Rome", "activities": []} for i in range(1, 32)
+        ]}
+        response = {"choices": [{"message": {"content": json.dumps(itinerary)}}]}
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def read(self, *_): return json.dumps(response).encode()
+
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder) / "key"
+            key.write_text("test-key")
+            with patch.dict(app.os.environ, {"OPENROUTER_KEY_FILE": str(key)}), \
+                 patch.object(app, "urlopen", return_value=FakeResponse()):
+                with self.assertRaisesRegex(RuntimeError, "incomplete itinerary"):
+                    app.plan({"prompt": "Rome January 1–31, 2027"})
 
 
 if __name__ == "__main__":
